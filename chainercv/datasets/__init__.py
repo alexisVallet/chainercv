@@ -36,3 +36,4 @@ from chainercv.datasets.voc.voc_utils import voc_instance_segmentation_label_nam
 from chainercv.datasets.voc.voc_utils import voc_semantic_segmentation_ignore_label_color  # NOQA
 from chainercv.datasets.voc.voc_utils import voc_semantic_segmentation_label_colors  # NOQA
 from chainercv.datasets.voc.voc_utils import voc_semantic_segmentation_label_names  # NOQA
+from chainercv.datasets.kinetics.kinetics_dataset import KineticsDataset  # NOQA

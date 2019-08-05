@@ -48,7 +48,6 @@ RUN cd $(mktemp -d) \
     -DBUILD_opencv_stitching=OFF \
     -DBUILD_opencv_superres=OFF \
     -DBUILD_opencv_video=OFF \
-    -DBUILD_opencv_videoio=OFF \
     -DBUILD_opencv_videostab=OFF \
     -DCMAKE_BUILD_TYPE=Release \
     -DWITH_CUDA=OFF \

@@ -27,3 +27,4 @@ from chainercv.utils.testing import assert_is_semantic_segmentation_dataset  # N
 from chainercv.utils.testing import assert_is_semantic_segmentation_link  # NOQA
 from chainercv.utils.testing import ConstantStubLink  # NOQA
 from chainercv.utils.testing import generate_random_bbox  # NOQA
+from chainercv.utils.video import read_video  # NOQA
