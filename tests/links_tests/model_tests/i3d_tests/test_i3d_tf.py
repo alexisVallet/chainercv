@@ -17,6 +17,8 @@ import tensorflow as tf
 
 import chainercv.links.model.i3d.i3d as i3d
 from chainercv.datasets.kinetics.kinetics_dataset import KineticsDataset
+from examples.i3d.tfckpt2npz import load_tensorflow_checkpoint, \
+    unit3d_load_tensorflow_weights
 
 _TEST_VIDEO_DIRECTORY = os.path.join(
     'data',
@@ -38,7 +40,7 @@ def test_simple():
     with chainer.using_config('train', True):
         chainer.cuda.get_device_from_id(0).use()
         model = i3d.I3D(600, 0.5)
-        model.load_tensorflow_checkpoint(_TEST_CHECKPOINT)
+        load_tensorflow_checkpoint(model, _TEST_CHECKPOINT)
         model.to_gpu()
         dummy_batch = np.random.uniform(-1, 1, (8, 3, 64, 64, 64)).astype(np.float32)
         dummy_batch = chainer.Variable(chainer.backends.cuda.to_gpu(dummy_batch, device=0))
@@ -127,7 +129,7 @@ def test_load_tensorflow_weights(data, tf_conv3d_fixture):
             use_bias=True,
             activation_fn=None,
         )
-        unit3d.load_tensorflow_weights(weights=w_tf, bias=b_tf, beta=beta_tf, moving_mean=moving_mean_tf,
+        unit3d_load_tensorflow_weights(unit3d, weights=w_tf, bias=b_tf, beta=beta_tf, moving_mean=moving_mean_tf,
                                        moving_variance=moving_variance_tf)
         unit3d.to_gpu(0)
         x_ch = chainer.Variable(np.moveaxis(x_tf, 4, 1))
@@ -153,8 +155,6 @@ def test_load_tensorflow_weights(data, tf_conv3d_fixture):
     # Checking that the output is near identical.
     y_ch_tf = np.moveaxis(cp.asnumpy(y_ch.data), 1, 4)
     np.testing.assert_allclose(y_ch_tf, y_tf, rtol=0.001, atol=0.001)
-
-
 
 
 # Include the original Tensorflow I3D model for testing purposes only.
@@ -648,7 +648,7 @@ def test_tf_vs_chainer_i3d():
             with chainer.using_config('dtype', chainer_dtype):
                 print(chainer.config.dtype)
                 model_chainer = i3d.I3D(num_classes=600, dropout_keep_prob=1.0)
-                model_chainer.load_tensorflow_checkpoint(checkpoint_filename)
+                load_tensorflow_checkpoint(model_chainer, checkpoint_filename)
                 model_chainer.to_gpu(0)
                 input_chainer = cp.array(np.moveaxis(input_tf, 4, 1).astype(
                     input_dtype))
@@ -673,30 +673,3 @@ def test_tf_vs_chainer_i3d():
                 np.testing.assert_allclose(np.moveaxis(chainer_out, 1, 4),
                                            tf_out, rtol=rtol, atol=atol)
         tf.reset_default_graph()
-
-
-if __name__ == "__main__":
-    # Visual check that the preprocessing output looks correct
-    with open(_TEST_LABEL_MAP) as label_map_file:
-        label_list = [re.sub('[^.a-zA-Z0-9-_.@+?=/]', '_', l.strip()) for l in label_map_file.readlines()]
-    label_map = {
-        label_name: i for i, label_name in enumerate(label_list)
-    }
-    int_to_label = {
-        i: l for l, i in label_map.items()
-    }
-    dataset = KineticsDataset(
-        video_directory=_TEST_VIDEO_DIRECTORY,
-    )
-    for crops, label in dataset:
-        seq_length = crops.shape[1]
-        print(int_to_label[label])
-        print(crops.shape, crops.dtype, type(crops))
-
-        for i in range(seq_length):
-            # Convert crop crom CHW RGB to HWC BGR as expected by OpenCV.
-            crop = crops[:, i]
-            crop = np.moveaxis(crop, 0, 2) + 1. / 2.
-            crop = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
-            cv2.imshow("crop", crop)
-            cv2.waitKey(0)
