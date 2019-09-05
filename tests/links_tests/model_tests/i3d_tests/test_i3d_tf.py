@@ -14,11 +14,12 @@ from hypothesis.extra.numpy import arrays
 from pytest import fixture
 import sonnet as snt
 import tensorflow as tf
+import tempfile
 
 import chainercv.links.model.i3d.i3d as i3d
 from chainercv.datasets.kinetics.kinetics_dataset import KineticsDataset
 from examples.i3d.tfckpt2npz import load_tensorflow_checkpoint, \
-    unit3d_load_tensorflow_weights
+    unit3d_load_tensorflow_weights, tf_checkpoint_to_npz
 
 _TEST_VIDEO_DIRECTORY = os.path.join(
     'data',
@@ -597,79 +598,92 @@ class I3D(snt.AbstractModule):
     return predictions, end_points
 
 
-def test_tf_vs_chainer_i3d():
-    for chainer_dtype, input_dtype in ((np.float32, np.float32),
-                                       (chainer.mixed16, np.float16)):
-        # Loads both the original Tensorflow and Chainer model, checks that after
-        # loading the checkpoint for both the model activations are the same for
-        # each layer.
-        tf_end_point_to_chainer = {
-            "Conv3d_1a_7x7": "conv3d_1a_7x7",
-            "MaxPool3d_2a_3x3": "max_pool_3d_2a_3x3",
-            "Conv3d_2b_1x1": "conv3d_2b_1x1",
-            "Conv3d_2c_3x3": "conv3d_2c_3x3",
-            "MaxPool3d_3a_3x3": "max_pool_3d_3a_3x3",
-            "Mixed_3b": "mixed_3b",
-            "Mixed_3c": "mixed_3c",
-            "MaxPool3d_4a_3x3": "max_pool_3d_4a_3x3",
-            "Mixed_4b": "mixed_4b",
-            "Mixed_4c": "mixed_4c",
-            "Mixed_4d": "mixed_4d",
-            "Mixed_4e": "mixed_4e",
-            "Mixed_4f": "mixed_4f",
-            "MaxPool3d_5a_2x2": "max_pool_3d_5a_2x2",
-            "Mixed_5b": "mixed_5b",
-            "Mixed_5c": "mixed_5c",
-            "Logits": "averaged_logits",
-        }
-        input_tf = np.random.RandomState(8929042).uniform(
-            low=-1, high=1, size=(1, 32, 224, 224, 3)).astype(np.float32)
-        rgb_input_tf = tf.placeholder(tf.float32, shape=(1, None, None, None, 3))
-        model_tf = I3D(num_classes=600, spatial_squeeze=True,
-                                final_endpoint='Logits')
-        _, end_points = model_tf(rgb_input_tf, is_training=False,
-                                 dropout_keep_prob=1.0)
-        rgb_variable_map = {}
-        for variable in tf.global_variables():
-            rgb_variable_map[variable.name.replace(':0', '')[
-                             len('inception_i3d/'):]] = variable
-        saver = tf.train.Saver(reshape=True, var_list=rgb_variable_map)
-        checkpoint_filename = _TEST_CHECKPOINT
+def check_chainer_activations_against_tf(model_chainer, chainer_dtype, input_dtype):
+    # Loads both the original Tensorflow and Chainer model, checks that after
+    # loading the checkpoint for both the model activations are the same for
+    # each layer.
+    tf_end_point_to_chainer = {
+        "Conv3d_1a_7x7": "conv3d_1a_7x7",
+        "MaxPool3d_2a_3x3": "max_pool_3d_2a_3x3",
+        "Conv3d_2b_1x1": "conv3d_2b_1x1",
+        "Conv3d_2c_3x3": "conv3d_2c_3x3",
+        "MaxPool3d_3a_3x3": "max_pool_3d_3a_3x3",
+        "Mixed_3b": "mixed_3b",
+        "Mixed_3c": "mixed_3c",
+        "MaxPool3d_4a_3x3": "max_pool_3d_4a_3x3",
+        "Mixed_4b": "mixed_4b",
+        "Mixed_4c": "mixed_4c",
+        "Mixed_4d": "mixed_4d",
+        "Mixed_4e": "mixed_4e",
+        "Mixed_4f": "mixed_4f",
+        "MaxPool3d_5a_2x2": "max_pool_3d_5a_2x2",
+        "Mixed_5b": "mixed_5b",
+        "Mixed_5c": "mixed_5c",
+        "Logits": "averaged_logits",
+    }
+    input_tf = np.random.RandomState(8929042).uniform(
+        low=-1, high=1, size=(1, 32, 224, 224, 3)).astype(np.float32)
+    rgb_input_tf = tf.placeholder(tf.float32, shape=(1, None, None, None, 3))
+    model_tf = I3D(num_classes=600, spatial_squeeze=True,
+                   final_endpoint='Logits')
+    _, end_points = model_tf(rgb_input_tf, is_training=False,
+                             dropout_keep_prob=1.0)
+    rgb_variable_map = {}
+    for variable in tf.global_variables():
+        rgb_variable_map[variable.name.replace(':0', '')[
+                         len('inception_i3d/'):]] = variable
+    saver = tf.train.Saver(reshape=True, var_list=rgb_variable_map)
+    checkpoint_filename = _TEST_CHECKPOINT
 
-        print("Computing model outputs with tensorflow...")
-        with tf.Session() as sess:
-            saver.restore(sess, checkpoint_filename)
-            end_points_tf = sess.run(end_points, feed_dict={
-                rgb_input_tf: input_tf
-            })
-        print("Computing model outputs with Chainer...")
-        chainer.cuda.get_device_from_id(-1).use()
-        with chainer.using_config('train', False):
-            with chainer.using_config('dtype', chainer_dtype):
-                print(chainer.config.dtype)
-                model_chainer = i3d.I3D(num_classes=600, dropout_keep_prob=1.0)
-                load_tensorflow_checkpoint(model_chainer, checkpoint_filename)
-                model_chainer.to_gpu(0)
-                input_chainer = cp.array(np.moveaxis(input_tf, 4, 1).astype(
-                    input_dtype))
-                end_points_chainer = model_chainer(
-                    input_chainer, layers=list(tf_end_point_to_chainer.values()))
-        print("Comparing results...")
-        if chainer_dtype == np.float32:
-            rtol = 1E-4
-            atol = 1E-4
+    print("Computing model outputs with tensorflow...")
+    with tf.Session() as sess:
+        saver.restore(sess, checkpoint_filename)
+        end_points_tf = sess.run(end_points, feed_dict={
+            rgb_input_tf: input_tf
+        })
+    print("Computing model outputs with Chainer...")
+    chainer.cuda.get_device_from_id(-1).use()
+    with chainer.using_config('train', False):
+        with chainer.using_config('dtype', chainer_dtype):
+            print(chainer.config.dtype)
+            input_chainer = cp.array(np.moveaxis(input_tf, 4, 1).astype(
+                input_dtype))
+            end_points_chainer = model_chainer(
+                input_chainer, layers=list(tf_end_point_to_chainer.values()))
+    print("Comparing results...")
+    if chainer_dtype == np.float32:
+        rtol = 1E-4
+        atol = 1E-4
+    else:
+        rtol = 1E-1
+        atol = 1E-1
+    for tf_key, chainer_key in tf_end_point_to_chainer.items():
+        print("Comparing {} and {}".format(tf_key, chainer_key))
+        chainer_out = cp.asnumpy(end_points_chainer[chainer_key].data.astype(
+            np.float32))
+        tf_out = end_points_tf[tf_key]
+        if chainer_out.ndim == 2:
+            np.testing.assert_allclose(chainer_out, tf_out,
+                                       rtol=rtol, atol=atol)
         else:
-            rtol = 1E-1
-            atol = 1E-1
-        for tf_key, chainer_key in tf_end_point_to_chainer.items():
-            print("Comparing {} and {}".format(tf_key, chainer_key))
-            chainer_out = cp.asnumpy(end_points_chainer[chainer_key].data.astype(
-                np.float32))
-            tf_out = end_points_tf[tf_key]
-            if chainer_out.ndim == 2:
-                np.testing.assert_allclose(chainer_out, tf_out,
-                                           rtol=rtol, atol=atol)
-            else:
-                np.testing.assert_allclose(np.moveaxis(chainer_out, 1, 4),
-                                           tf_out, rtol=rtol, atol=atol)
-        tf.reset_default_graph()
+            np.testing.assert_allclose(np.moveaxis(chainer_out, 1, 4),
+                                       tf_out, rtol=rtol, atol=atol)
+    tf.reset_default_graph()
+
+
+def test_tf_vs_chainer_i3d():
+    for chainer_dtype, input_dtype in ((np.float32, np.float32),):
+        model_chainer = i3d.I3D(num_classes=600, dropout_keep_prob=1.0)
+        load_tensorflow_checkpoint(model_chainer, _TEST_CHECKPOINT)
+        model_chainer.to_gpu(0)
+        check_chainer_activations_against_tf(model_chainer, input_dtype, chainer_dtype)
+
+
+def test_tf_vs_npz_i3d():
+    with tempfile.NamedTemporaryFile() as tmp_npz_checkpoint_file:
+        tf_checkpoint_to_npz(_TEST_CHECKPOINT, tmp_npz_checkpoint_file.name)
+        for chainer_dtype, input_dtype in ((np.float32, np.float32),):
+            model = i3d.I3D(600, 1.0)
+            model.to_gpu(0)
+            chainer.serializers.load_npz(tmp_npz_checkpoint_file.name, model)
+            check_chainer_activations_against_tf(model, input_dtype, chainer_dtype)

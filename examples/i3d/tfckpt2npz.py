@@ -139,6 +139,17 @@ def unit3d_load_tensorflow_weights(unit3d, weights, bias=None, beta=None,
             unit3d.bn._initialize_params(beta.shape[0])
 
 
+def tf_checkpoint_to_npz(tensorflow_model_checkpoint, output_npz_checkpoint):
+    model = I3D(num_classes=600, dropout_keep_prob=1.0)
+    load_tensorflow_checkpoint(model, tensorflow_model_checkpoint)
+    # Need to input a dummy batch to force proper initialization of the weights.
+    with chainer.using_config('train', False):
+        dummy = np.zeros((2, 3, 16, 224, 224), dtype=np.float32)
+        _ = model(dummy)
+    chainer.serializers.save_npz(
+        output_npz_checkpoint, model)
+
+
 def main():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument('tensorflow_model_checkpoint',
@@ -148,10 +159,7 @@ def main():
                             help="Path to the output .npz model checkpoint "
                                  "to generate.")
     args = arg_parser.parse_args()
-    model = I3D(num_classes=600, dropout_keep_prob=1.0)
-    load_tensorflow_checkpoint(model, args.tensorflow_model_checkpoint)
-    chainer.serializers.save_npz(
-        args.output_npz_checkpoint, model)
+    tf_checkpoint_to_npz(args.tensorflow_model_checkpoint, args.output_npz_checkpoint)
 
 
 if __name__ == '__main__':
