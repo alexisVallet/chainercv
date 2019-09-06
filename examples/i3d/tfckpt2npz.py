@@ -79,7 +79,16 @@ def load_tensorflow_checkpoint(i3d, checkpoint_filename,
         "Mixed_5c/Branch_3/Conv3d_0b_1x1": i3d.mixed_5c_branch_3_conv3d_0b_1x1,
     }
     ckpt_reader = tf.train.NewCheckpointReader(checkpoint_filename)
+    # Some checkpoint have an additional prepended RGB or Flow scope.
+    first_scope = list(ckpt_reader.get_variable_to_shape_map().keys())[0]
+    allowed_scopes = ['RGB/inception_i3d/', 'Flow/inception_i3d/']
+    prefix = ''
+    for scope in allowed_scopes:
+        if first_scope.startswith(scope):
+            prefix = scope
+
     for tf_scope, unit3d in tf_scope_to_unit3d.items():
+        tf_scope = prefix + tf_scope
         # Converting weights from Tensorflow's [t, h, w, c_i, c_o] layout to
         # Chainer's [c_o, c_i, t, h, w] layout.
         weights = ckpt_reader.get_tensor(
@@ -139,12 +148,13 @@ def unit3d_load_tensorflow_weights(unit3d, weights, bias=None, beta=None,
             unit3d.bn._initialize_params(beta.shape[0])
 
 
-def tf_checkpoint_to_npz(tensorflow_model_checkpoint, output_npz_checkpoint):
-    model = I3D(num_classes=600, dropout_keep_prob=1.0)
+def tf_checkpoint_to_npz(tensorflow_model_checkpoint, output_npz_checkpoint, num_channels,
+                         num_classes):
+    model = I3D(num_classes=num_classes, dropout_keep_prob=1.0)
     load_tensorflow_checkpoint(model, tensorflow_model_checkpoint)
     # Need to input a dummy batch to force proper initialization of the weights.
     with chainer.using_config('train', False):
-        dummy = np.zeros((2, 3, 16, 224, 224), dtype=np.float32)
+        dummy = np.zeros((2, num_channels, 16, 224, 224), dtype=np.float32)
         _ = model(dummy)
     chainer.serializers.save_npz(
         output_npz_checkpoint, model)
@@ -158,8 +168,12 @@ def main():
     arg_parser.add_argument('output_npz_checkpoint',
                             help="Path to the output .npz model checkpoint "
                                  "to generate.")
+    arg_parser.add_argument('num_channels', type=int, help="Number of input channels of the model. 3 for RGB, 2 "
+                                                           "for optical flow.")
+    arg_parser.add_argument('num_classes', type=int, help="Output number of classes. 400 or 600 for kinetics.")
     args = arg_parser.parse_args()
-    tf_checkpoint_to_npz(args.tensorflow_model_checkpoint, args.output_npz_checkpoint)
+    tf_checkpoint_to_npz(args.tensorflow_model_checkpoint, args.output_npz_checkpoint, args.num_channels,
+                         args.num_classes)
 
 
 if __name__ == '__main__':

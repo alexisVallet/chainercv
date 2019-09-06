@@ -15,6 +15,7 @@ from pytest import fixture
 import sonnet as snt
 import tensorflow as tf
 import tempfile
+from collections import OrderedDict
 
 import chainercv.links.model.i3d.i3d as i3d
 from chainercv.datasets.kinetics.kinetics_dataset import KineticsDataset
@@ -25,137 +26,25 @@ _TEST_VIDEO_DIRECTORY = os.path.join(
     'data',
     'kinetics_val'
 )
-_TEST_LABEL_MAP = os.path.join(
+_KINETICS_LABEL_MAP = os.path.join(
     'models',
-    'rgb_scratch_kin600',
-    'label_map_600.txt'
+    'label_map.txt'
 )
-_TEST_CHECKPOINT = os.path.join(
-    'models',
-    'rgb_scratch_kin600',
-    'model.ckpt'
-)
+_TEST_CHECKPOINTS = OrderedDict([
+    ("checkpoints", [os.path.join('models', 'rgb_scratch_kin600', 'model.ckpt'),
+                     os.path.join('models', 'rgb_imagenet', 'model.ckpt'),
+                     os.path.join('models', 'rgb_scratch', 'model.ckpt'),
+                     os.path.join('models', 'flow_imagenet', 'model.ckpt'),
+                     os.path.join('models', 'flow_scratch', 'model.ckpt')]),
+    ("num_classes", [600, 400, 400, 400, 400]),
+    ("input_channels", [3, 3, 3, 2, 2]),
+    ('tf_scope_prefix', ('', 'RGB/inception_i3d/', 'RGB/inception_i3d/', 'Flow/inception_i3d/',
+                         'Flow/inception_i3d/'))
+])
 
 
-def test_simple():
-    with chainer.using_config('train', True):
-        chainer.cuda.get_device_from_id(0).use()
-        model = i3d.I3D(600, 0.5)
-        load_tensorflow_checkpoint(model, _TEST_CHECKPOINT)
-        model.to_gpu()
-        dummy_batch = np.random.uniform(-1, 1, (8, 3, 64, 64, 64)).astype(np.float32)
-        dummy_batch = chainer.Variable(chainer.backends.cuda.to_gpu(dummy_batch, device=0))
-        features = model(dummy_batch, layers=(
-            "conv3d_1a_7x7",
-            "max_pool_3d_2a_3x3",
-            "max_pool_3d_3a_3x3",
-            "mixed_3b",
-            "max_pool_3d_4a_3x3",
-            "mixed_3b",
-            "mixed_4b",
-            "mixed_4c",
-            "mixed_4d",
-            "mixed_4e",
-            "mixed_4f",
-            "max_pool_3d_5a_2x2",
-            "avg_pool",
-            "logits",
-        ))
-        for k, v in features.items():
-            v = cp.asnumpy(v.data)
-            print(k, v.shape, v.mean(), v.std(), v.min(), v.max())
-
-
-@ fixture()
-def tf_conv3d_fixture():
-    _x = tf.placeholder(dtype=tf.float32, shape=(None, None, None, None, None))
-    _w = tf.placeholder(dtype=tf.float32, shape=(None, None, None, None, None))
-    _b = tf.placeholder(dtype=tf.float32, shape=(1, 1, 1, 1,  None))
-    _beta = tf.placeholder(dtype=tf.float32, shape=(1, 1, 1, 1, None))
-    _moving_mean = tf.placeholder(dtype=tf.float32, shape=(1, 1, 1, 1, None))
-    _moving_variance = tf.placeholder(dtype=tf.float32, shape=(1, 1, 1, 1, None))
-    _y = tf.nn.conv3d(_x, _w, (1, 1, 1, 1, 1), padding='SAME') + _b
-    _y = tf.nn.batch_normalization(
-        _y,
-        mean=_moving_mean,
-        variance=_moving_variance,
-        offset=_beta,
-        scale=None,
-        variance_epsilon=1e-3,
-    )
-    sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(
-        per_process_gpu_memory_fraction=0.3
-    )))
-
-    def _conv3d(x, w, b, beta, moving_mean, moving_variance):
-        return sess.run(_y, feed_dict={
-            _x: x,
-            _w: w,
-            _b: b,
-            _beta: beta,
-            _moving_mean: moving_mean,
-            _moving_variance: moving_variance,
-        })
-    return _conv3d
-
-
-@settings(deadline=None)
-@given(data=data())
-def test_load_tensorflow_weights(data, tf_conv3d_fixture):
-    stride = 1
-    kdim = data.draw(integers(min_value=1, max_value=7))
-    in_channels = data.draw(integers(min_value=1, max_value=16))
-    out_channels = data.draw(integers(min_value=1, max_value=16))
-    crop_size = data.draw(integers(min_value=1, max_value=16))
-    seq_length = data.draw(integers(min_value=1, max_value=8))
-    batch_size = data.draw(integers(min_value=1, max_value=4))
-    scalar_strat = floats(min_value=-1, max_value=1, allow_nan=False, allow_infinity=False)
-    x_tf = data.draw(arrays(shape=(batch_size, seq_length, crop_size, crop_size, in_channels),
-                            elements=scalar_strat, dtype=np.float32))
-    w_tf = data.draw(arrays(shape=(kdim, kdim, kdim, in_channels, out_channels),
-                            elements=scalar_strat, dtype=np.float32))
-    b_tf = data.draw(arrays(shape=(1, 1, 1, 1, out_channels), elements=scalar_strat, dtype=np.float32))
-    beta_tf = data.draw(arrays(shape=(1, 1, 1, 1, out_channels), elements=scalar_strat, dtype=np.float32))
-    moving_mean_tf = data.draw(arrays(shape=(1, 1, 1, 1, out_channels), elements=scalar_strat, dtype=np.float32))
-    moving_variance_tf = data.draw(arrays(shape=(1, 1, 1, 1, out_channels),
-                                          elements=floats(min_value=0.001, max_value=1.999, allow_nan=False, allow_infinity=False), dtype=np.float32))
-    y_tf = tf_conv3d_fixture(x_tf, w_tf, b_tf, beta_tf, moving_mean_tf, moving_variance_tf)
-
-    with chainer.using_config('train', False):
-        unit3d = i3d.Unit3D(
-            output_channels=out_channels,
-            kernel_shape=(kdim, kdim, kdim),
-            stride=(stride, stride, stride),
-            use_batch_norm=True,
-            use_bias=True,
-            activation_fn=None,
-        )
-        unit3d_load_tensorflow_weights(unit3d, weights=w_tf, bias=b_tf, beta=beta_tf, moving_mean=moving_mean_tf,
-                                       moving_variance=moving_variance_tf)
-        unit3d.to_gpu(0)
-        x_ch = chainer.Variable(np.moveaxis(x_tf, 4, 1))
-        x_ch.to_gpu(0)
-        y_ch = unit3d(x_ch)
-    actual_w = np.moveaxis(
-        cp.asnumpy(unit3d.conv3d.conv.W.data),
-        1,
-        -1
-    )
-    actual_w = np.moveaxis(
-        actual_w,
-        0,
-        -1
-    )
-    actual_b = np.reshape(
-        cp.asnumpy(unit3d.conv3d.conv.b.data),
-        (1, 1, 1, 1, out_channels)
-    )
-    np.testing.assert_equal(actual_w, w_tf)
-    np.testing.assert_equal(actual_b, b_tf)
-
-    # Checking that the output is near identical.
-    y_ch_tf = np.moveaxis(cp.asnumpy(y_ch.data), 1, 4)
-    np.testing.assert_allclose(y_ch_tf, y_tf, rtol=0.001, atol=0.001)
+def _get_checkpoints():
+    return zip(*list(_TEST_CHECKPOINTS.values()))
 
 
 # Include the original Tensorflow I3D model for testing purposes only.
@@ -598,7 +487,8 @@ class I3D(snt.AbstractModule):
     return predictions, end_points
 
 
-def check_chainer_activations_against_tf(model_chainer, chainer_dtype, input_dtype):
+def check_chainer_activations_against_tf(model_chainer, input_channels, num_classes, checkpoint_filename,
+                                         chainer_dtype, input_dtype, scope_prefix):
     # Loads both the original Tensorflow and Chainer model, checks that after
     # loading the checkpoint for both the model activations are the same for
     # each layer.
@@ -622,18 +512,16 @@ def check_chainer_activations_against_tf(model_chainer, chainer_dtype, input_dty
         "Logits": "averaged_logits",
     }
     input_tf = np.random.RandomState(8929042).uniform(
-        low=-1, high=1, size=(1, 32, 224, 224, 3)).astype(np.float32)
-    rgb_input_tf = tf.placeholder(tf.float32, shape=(1, None, None, None, 3))
-    model_tf = I3D(num_classes=600, spatial_squeeze=True,
+        low=-1, high=1, size=(1, 32, 224, 224, input_channels)).astype(np.float32)
+    rgb_input_tf = tf.placeholder(tf.float32, shape=(1, None, None, None, input_channels))
+    model_tf = I3D(num_classes=num_classes, spatial_squeeze=True,
                    final_endpoint='Logits')
     _, end_points = model_tf(rgb_input_tf, is_training=False,
                              dropout_keep_prob=1.0)
-    rgb_variable_map = {}
+    variable_map = {}
     for variable in tf.global_variables():
-        rgb_variable_map[variable.name.replace(':0', '')[
-                         len('inception_i3d/'):]] = variable
-    saver = tf.train.Saver(reshape=True, var_list=rgb_variable_map)
-    checkpoint_filename = _TEST_CHECKPOINT
+        variable_map[variable.name.replace(':0', '').replace('inception_i3d/', scope_prefix)] = variable
+    saver = tf.train.Saver(reshape=True, var_list=variable_map)
 
     print("Computing model outputs with tensorflow...")
     with tf.Session() as sess:
@@ -673,17 +561,23 @@ def check_chainer_activations_against_tf(model_chainer, chainer_dtype, input_dty
 
 def test_tf_vs_chainer_i3d():
     for chainer_dtype, input_dtype in ((np.float32, np.float32),):
-        model_chainer = i3d.I3D(num_classes=600, dropout_keep_prob=1.0)
-        load_tensorflow_checkpoint(model_chainer, _TEST_CHECKPOINT)
-        model_chainer.to_gpu(0)
-        check_chainer_activations_against_tf(model_chainer, input_dtype, chainer_dtype)
+        for checkpoint, num_classes, input_channels, scope_prefix in _get_checkpoints():
+            model_chainer = i3d.I3D(num_classes=num_classes, dropout_keep_prob=1.0)
+            load_tensorflow_checkpoint(model_chainer, checkpoint)
+            model_chainer.to_gpu(0)
+            check_chainer_activations_against_tf(model_chainer, input_channels, num_classes, checkpoint,
+                                                 input_dtype, chainer_dtype, scope_prefix)
 
 
 def test_tf_vs_npz_i3d():
-    with tempfile.NamedTemporaryFile() as tmp_npz_checkpoint_file:
-        tf_checkpoint_to_npz(_TEST_CHECKPOINT, tmp_npz_checkpoint_file.name)
-        for chainer_dtype, input_dtype in ((np.float32, np.float32),):
-            model = i3d.I3D(600, 1.0)
-            model.to_gpu(0)
-            chainer.serializers.load_npz(tmp_npz_checkpoint_file.name, model)
-            check_chainer_activations_against_tf(model, input_dtype, chainer_dtype)
+    for checkpoint, num_classes, input_channels, scope_prefix in _get_checkpoints():
+        with tempfile.NamedTemporaryFile() as tmp_npz_checkpoint_file:
+            tf_checkpoint_to_npz(checkpoint, tmp_npz_checkpoint_file.name, input_channels, num_classes)
+            tf.reset_default_graph()
+            for chainer_dtype, input_dtype in ((np.float32, np.float32),):
+                model = i3d.I3D(num_classes, 1.0)
+                model.to_gpu(0)
+                chainer.serializers.load_npz(tmp_npz_checkpoint_file.name, model)
+                check_chainer_activations_against_tf(model, input_channels, num_classes, checkpoint,
+                                                     input_dtype, chainer_dtype, scope_prefix)
+
