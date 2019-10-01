@@ -8,7 +8,8 @@ except ImportError:
     _cv2_available = False
 
 
-def read_video(file, start_frame=None, end_frame=None, dtype=np.float32):
+def read_video(file, start_frame=None, end_frame=None,
+               dtype=np.float32, return_framerate=False):
     """ Read a video from a file.
 
     This function reads video frames from a given file. This returns an
@@ -25,9 +26,13 @@ def read_video(file, start_frame=None, end_frame=None, dtype=np.float32):
     (exclusive). If it is `None`, load until the end of video.
     :param dtype: The type of the output arrays. The default value is
     :obj:`numpy.float32`
+    :param return_framerate (boolean): Set to true to return the video's
+    framerate in frames per second alongside the video.
     :return: An iterable of `numpy.ndarray`, each of which has shape (3, H, W).
     If both `start_frame` and `end_frame` are specified, this iterable is
-    guaranteed to yield exactly `end_frame - start_frame` images.
+    guaranteed to yield exactly `end_frame - start_frame` images. If
+    `return_framerate` is True, the video framerate in frames per seconds
+    is returned as a floating point value.
     """
     if not _cv2_available:
         raise ValueError('You need to have OpenCV installed to use '
@@ -65,4 +70,7 @@ def read_video(file, start_frame=None, end_frame=None, dtype=np.float32):
     # FHWC -> FCHW
     frames = np.moveaxis(frames, 3, 1)
 
-    return frames
+    if not return_framerate:
+        return frames
+    else:
+        return frames, vc.get(cv2.CAP_PROP_FPS)

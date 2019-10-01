@@ -148,12 +148,7 @@ def maybe_add_features(layers, outputs, layer_name, x):
 
 class I3D(chainer.Chain):
     # TODO: move those to the evaluation script.
-    eval_sequence_length = 250
-    eval_batch_size = 6
-    resize_min_dim = 256
-    crop_size = (224, 224)
-    target_framerate = 25
-    dropout_keep_prob = 1.0
+
 
     def __init__(self, num_classes, dropout_keep_prob,
                  time_strides=(2, 1, 1, 2, 2,),
