@@ -1,16 +1,14 @@
 import argparse
 import os
 from itertools import islice, cycle
+import glob
 
-import cv2
 import numpy as np
-import PIL
 import chainer
 import chainer.links as L
 import chainermn
 
 from chainercv.links.model.i3d.i3d import I3D
-from chainercv.transforms.image.resize import resize
 from chainercv.transforms.image.center_crop import center_crop
 from chainercv.datasets.kinetics.kinetics_dataset import KineticsDataset
 
@@ -38,95 +36,40 @@ class JointI3D(chainer.Chain):
         return logits1 + logits2
 
 
-class VideoTransform(object):
-    def __init__(self, modality):
-        assert modality in ('rgb', 'flow')
-        self.modality = modality
-
-    def __call__(self, video_array):
-        if self.modality == "rgb":
-            # Linear scaling between -1 and 1
-            return video_array / 128 - 1.
-        elif self.modality == "flow":
-            # Computing TVL1 optical flow
-            optical_flow = cv2.DualTVL1OpticalFlow_create()
-            flow_array = []
-
-            num_frames = video_array.shape[0]
-            hwc_video = np.moveaxis(video_array, 1, 3).astype(np.uint8)
-            prev_grayscale_frame = None
-
-            for i in range(num_frames):
-                rgb_frame = hwc_video[i]
-                grayscale_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
-                if prev_grayscale_frame is not None:
-                    flow_array.append(optical_flow.calc(prev_grayscale_frame, grayscale_frame, None))
-                prev_grayscale_frame = grayscale_frame
-
-            hwc_flow_video = np.stack(flow_array, axis=0)
-            chw_flow_video = np.moveaxis(hwc_flow_video, 3, 1)
-
-            chw_flow_video = np.maximum(-20, np.minimum(20, chw_flow_video))
-            chw_flow_video /= 20.
-
-            return chw_flow_video
-
-
 class I3DTransform(object):
-    def __init__(self, transforms, resize_dim=256, crop_size=224,
+    def __init__(self, resize_dim=256, crop_size=224,
                  sample_video_frames=79):
-        self.transforms = transforms
         self.resize_dim = resize_dim
         self.crop_size = crop_size
         self.sample_video_frames = sample_video_frames
 
     def __call__(self, inputs):
-        (video_array, orig_framerate), label = inputs
-
-        # Resample the video to 25 frames per second
-        total_video_length = len(video_array) / orig_framerate
-        sample_frame_indices = np.linspace(
-            0, len(video_array) - 1,
-            max(1, total_video_length * 25), dtype=np.int64)
-        video_array = video_array[sample_frame_indices]
-
-        # Only look at the first sample_video_frames frames. If not enough,
-        # repeat the video.
-        indices = list(islice(cycle(range(len(video_array))),
-                              self.sample_video_frames))
-        video_array = video_array[indices]
-
+        video_arrays, label = inputs
         cropped_videos = []
 
-        for t in self.transforms:
-            processed_video = t(video_array)
-
-            # Resize so the smallest dimension is fixed.
-            h, w = processed_video.shape[2:4]
-            if h < w:
-                new_size = (self.resize_dim, int(round(w * self.resize_dim / h)))
-            else:
-                new_size = (int(round(h * self.resize_dim / w)), self.resize_dim)
-            resized_video = []
-            num_frames = processed_video.shape[0]
-            for i in range(num_frames):
-                resized_video.append(resize(processed_video[i], new_size,
-                                            interpolation=PIL.Image.BILINEAR))
-            resized_video = np.stack(resized_video, axis=0)
+        for video_array in video_arrays:
+            # Only look at the first sample_video_frames frames. If not enough,
+            # repeat the video.
+            indices = list(islice(cycle(range(len(video_array))),
+                                  self.sample_video_frames))
+            video_array = video_array[indices]
 
             # Extract the center crop.
-            _, crop_params = center_crop(np.zeros((3, new_size[0], new_size[1]), dtype=np.uint8),
-                                         (self.crop_size, self.crop_size), return_param=True)
-            cropped_video = resized_video[:, :, crop_params['y_slice'], crop_params['x_slice']]
+            h, w = video_array.shape[2:4]
+            _, crop_params = center_crop(
+                np.zeros((3, h, w), dtype=np.uint8),
+                         (self.crop_size, self.crop_size), return_param=True)
+            cropped_video = \
+                video_array[:, :, crop_params['y_slice'],
+                                crop_params['x_slice']]
             # NCHW to CNHW
             cropped_video = np.moveaxis(cropped_video, 0, 1)
+
+            # Rescaling between -1 and 1
+            cropped_video = (cropped_video.astype(np.float32) - 128) / 255
             cropped_videos.append(cropped_video)
 
         return tuple(cropped_videos + [label])
-
-
-def pad_concat(*args, **kwargs):
-    return chainer.dataset.concat_examples(*args, padding=True, **kwargs)
 
 
 def main():
@@ -159,13 +102,11 @@ def main():
                 ", ".join(args.models)))
 
     models = []
-    transforms = []
 
     for checkpoint, modality, num_classes in [_CHECKPOINTS[m] for m in args.models]:
         model = I3D(num_classes=num_classes, dropout_keep_prob=1.0)
         chainer.serializers.load_npz(checkpoint, model)
         models.append(model)
-        transforms.append(VideoTransform(modality=modality))
 
     if len(models) == 2:
         model = JointI3D(*models)
@@ -180,7 +121,7 @@ def main():
     dataset = chainermn.scatter_dataset(dataset, comm, shuffle=True)
     dataset = chainer.datasets.TransformDataset(
         dataset=dataset, transform=I3DTransform(
-            transforms, sample_video_frames=args.sample_video_frames))
+            sample_video_frames=args.sample_video_frames))
 
     iterator = chainer.iterators.MultiprocessIterator(
         dataset, batch_size=args.batch_size,

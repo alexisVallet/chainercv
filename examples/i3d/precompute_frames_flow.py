@@ -81,58 +81,32 @@ class VideoTransform(object):
         return out_dict
 
 
-class ZipSequenceEncodeTransform(object):
-    def __init__(self, output_directory):
-        self.output_directory = output_directory
-
+class JpegEncodeTransform(object):
     def __call__(self, sample):
-        sample_id, sample = sample
+        out_sample = {"label": sample["label"]}
         for modality in ("rgb", "flow_x", "flow_y"):
             if modality not in sample:
                 continue
             video_array = sample[modality]
-            out_dir = os.path.join(
-                self.output_directory,
-                modality,
-                "class_{}".format(sample["label"])
-            )
-            os.makedirs(out_dir, exist_ok=True)
-            sequence_filename = os.path.join(
-                out_dir,
-                "sample_{}.zip".format(sample_id)
-            )
-            with zipfile.ZipFile(sequence_filename, 'w') as sequence_zip:
-                for i, frame in enumerate(video_array):
-                    if modality == "rgb":
-                        # Converting the input to HWC BGR so opencv is happy
-                        frame_to_encode = cv2.cvtColor(
-                            np.moveaxis(frame, 0, 2),
-                            cv2.COLOR_RGB2BGR
-                        )
-                    elif modality.startswith("flow"):
-                        # Already grayscale, just need to crop the values
-                        # between -20 and 20, and bring it back to integer
-                        # range 0-255.
-                        frame_to_encode = (frame + 20) * 255 / 40
-                        frame_to_encode = np.maximum(
-                            0, np.minimum(255, np.round(frame_to_encode)))
-                        frame_to_encode = frame_to_encode.astype(np.uint8)
-                    _, jpeg_data = cv2.imencode('.jpg', frame_to_encode)
-                    sequence_zip.writestr('{}.jpg'.format(i),
-                                          jpeg_data.tobytes())
+            out_sample[modality] = []
+            for frame in video_array:
+                if modality == "rgb":
+                    # Converting the input to HWC BGR so opencv is happy
+                    frame_to_encode = cv2.cvtColor(
+                        np.moveaxis(frame, 0, 2),
+                        cv2.COLOR_RGB2BGR)
+                elif modality.startswith("flow"):
+                    # Already grayscale, just need to crop the values
+                    # between -20 and 20, and bring it back to integer
+                    # range 0-255.
+                    frame_to_encode = (frame + 20) * 255 / 40
+                    frame_to_encode = np.maximum(
+                        0, np.minimum(255, np.round(frame_to_encode)))
+                    frame_to_encode = frame_to_encode.astype(np.uint8)
+                _, jpeg_data = cv2.imencode('.jpg', frame_to_encode)
+                out_sample[modality].append(jpeg_data)
 
-        return 0
-
-
-class Enumerate(chainer.dataset.DatasetMixin):
-    def __init__(self, dataset):
-        self.dataset = dataset
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def get_example(self, i):
-        return i, self.dataset[i]
+        return out_sample
 
 
 def main():
@@ -141,8 +115,9 @@ def main():
     arg_parser.add_argument('output_directory')
     arg_parser.add_argument('--num_preprocess_workers', type=int, default=4)
     arg_parser.add_argument('--no_compute_flow', action='store_true')
-    arg_parser.add_argument('--print_progress_num_batches', type=int,
+    arg_parser.add_argument('--print_progress_num_shards', type=int,
                             default=1)
+    arg_parser.add_argument('--num_samples_per_shard', type=int, default=128)
     args = arg_parser.parse_args()
 
     dataset = KineticsDataset(args.dataset_directory, return_framerate=True,
@@ -150,24 +125,46 @@ def main():
     # Split the dataset across workers.
     comm = chainermn.create_communicator()
     dataset = chainer.datasets.TransformDataset(dataset, VideoTransform())
-    dataset = Enumerate(dataset)
     dataset = chainer.datasets.TransformDataset(
-        dataset, ZipSequenceEncodeTransform(args.output_directory))
+        dataset, JpegEncodeTransform())
     dataset = chainermn.scatter_dataset(dataset, comm,
                                         force_equal_length=False)
-    batch_size = args.num_preprocess_workers * 2
+
+    # Shuffling the samples is desirable for training purposes, and of no
+    # adverse consequence during evaluation, so performing it by default.
     iterator = chainer.iterators.MultiprocessIterator(
-        dataset=dataset, batch_size=batch_size,
+        dataset=dataset, batch_size=args.num_samples_per_shard,
         n_processes=args.num_preprocess_workers, n_prefetch=2,
-        repeat=False, shuffle=False)
+        repeat=False, shuffle=True)
 
-    num_processed_videos = 0
+    num_processed_samples = 0
+    os.makedirs(args.output_directory, exist_ok=True)
 
-    for i, b in enumerate(iterator):
-        num_processed_videos += len(b)
-        if i % args.print_progress_num_batches == 0 and comm.rank == 0:
-            print("Processed {} out of {} videos for root worker...".format(
-                num_processed_videos, len(dataset)))
+    for i, shard in enumerate(iterator):
+        shard_filename = os.path.join(
+            args.output_directory, "shard_{}.zip".format(i))
+
+        with zipfile.ZipFile(shard_filename, "w") as shard_zipfile:
+            for sample_id, sample in enumerate(shard):
+                sample_dir = "sample_{}".format(sample_id)
+                shard_zipfile.writestr(
+                    os.path.join(sample_dir, "label"), str(sample["label"]))
+
+                for modality in ("rgb", "flow_x", "flow_y"):
+                    if modality not in sample:
+                        continue
+                    video_array = sample[modality]
+                    for frame_id, frame_jpeg_data in enumerate(video_array):
+                        frame_key = os.path.join(
+                            sample_dir, modality, "{}.jpg".format(frame_id))
+                        shard_zipfile.writestr(frame_key,
+                                               frame_jpeg_data.tobytes())
+
+        num_processed_samples += len(shard)
+
+        if i % args.print_progress_num_shards == 0 and comm.rank == 0:
+            print("Processed {} out of {} samples for root worker.".format(
+                num_processed_samples, len(dataset)))
 
 
 if __name__ == '__main__':
