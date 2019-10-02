@@ -1,5 +1,6 @@
 import argparse
 import os
+from itertools import islice, cycle
 
 import cv2
 import numpy as np
@@ -89,9 +90,11 @@ class I3DTransform(object):
             max(1, total_video_length * 25), dtype=np.int64)
         video_array = video_array[sample_frame_indices]
 
-        # Only look at the first sample_video_frames frames.
-        video_array = video_array[
-                      0: min(len(video_array), self.sample_video_frames)]
+        # Only look at the first sample_video_frames frames. If not enough,
+        # repeat the video.
+        indices = list(islice(cycle(range(len(video_array))),
+                              self.sample_video_frames))
+        video_array = video_array[indices]
 
         cropped_videos = []
 
@@ -135,9 +138,9 @@ def main():
                                  "from the available choices. The chosen models should be trained "
                                  "on the same datasets and have the same number of classes for the "
                                  "results to be meaningful.")
-    arg_parser.add_argument("--batch_size", type=int, default=6)
-    arg_parser.add_argument("--num_preprocess_workers", type=int, default=4)
-    arg_parser.add_argument("--sample_video_frames", type=int, default=79)
+    arg_parser.add_argument("--batch_size", type=int, default=2)
+    arg_parser.add_argument("--num_preprocess_workers", type=int, default=2)
+    arg_parser.add_argument("--sample_video_frames", type=int, default=251)
     args = arg_parser.parse_args()
 
     comm = chainermn.create_communicator()
