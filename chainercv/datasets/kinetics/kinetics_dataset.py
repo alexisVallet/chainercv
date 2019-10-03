@@ -50,7 +50,7 @@ class KineticsDataset(GetterDataset):
     def __init__(self, data_dir, return_framerate=False,
                  num_video_check_workers=None, no_check_videos=False):
         super(KineticsDataset, self).__init__()
-        class_dirs = glob.glob(os.path.join(data_dir, '*/'))
+        class_dirs = sorted(glob.glob(os.path.join(data_dir, '*/')))
 
         if num_video_check_workers is None:
             num_video_check_workers = cpu_count()

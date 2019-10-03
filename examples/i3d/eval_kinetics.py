@@ -1,53 +1,63 @@
 import argparse
 import os
 from itertools import islice, cycle
-import glob
 
 import numpy as np
 import chainer
+import chainer.functions as F
 import chainer.links as L
 import chainermn
 
 from chainercv.links.model.i3d.i3d import I3D
 from chainercv.transforms.image.center_crop import center_crop
-from chainercv.datasets.kinetics.kinetics_dataset import KineticsDataset
+from examples.i3d.image_sequence_dataset import ImageSequenceDataset
 
-_CHECKPOINTS = {
-    "rgb_scratch_kinetics600": (os.path.join('models', 'rgb_scratch_kinetics600.npz'), "rgb", 600),
-    "rgb_imagenet_kinetics400": (os.path.join('models', 'rgb_imagenet_kinetics400.npz'), "rgb", 400),
-    "flow_imagenet_kinetics400": (os.path.join('models', 'flow_imagenet_kinetics400.npz'), "flow", 400),
-    "rgb_scratch_kinetics400": (os.path.join('models', 'rgb_scratch_kinetics400.npz'), "rgb", 400),
-    "flow_scratch_kinetics400": (os.path.join('models', 'flow_scratch_kinetics400.npz'), "flow", 400)
+_FLOW_CHECKPOINTS = {
+
+    "flow_imagenet_kinetics400": (os.path.join('models', 'flow_imagenet_kinetics400.npz'), 400),
+    "flow_scratch_kinetics400": (os.path.join('models', 'flow_scratch_kinetics400.npz'), 400)
+}
+
+_RGB_CHECKPOINTS = {
+    "rgb_scratch_kinetics600": (os.path.join('models', 'rgb_scratch_kinetics600.npz'), 600),
+    "rgb_imagenet_kinetics400": (os.path.join('models', 'rgb_imagenet_kinetics400.npz'), 400),
+    "rgb_scratch_kinetics400": (os.path.join('models', 'rgb_scratch_kinetics400.npz'), 400),
 }
 
 
 class JointI3D(chainer.Chain):
-    def __init__(self, model1, model2):
+    def __init__(self, rgb_model, flow_model):
         super(JointI3D, self).__init__()
 
         with self.init_scope():
-            self.model1 = model1
-            self.model2 = model2
+            self.rgb_model = rgb_model
+            self.flow_model = flow_model
 
-    def __call__(self, input1, input2):
-        logits1 = self.model1(input1)
-        logits2 = self.model2(input2)
+    def __call__(self, rgb, flow):
+        logits1 = self.rgb_model(rgb)
+        logits2 = self.flow_model(flow)
 
         return logits1 + logits2
 
 
 class I3DTransform(object):
-    def __init__(self, resize_dim=256, crop_size=224,
-                 sample_video_frames=79):
-        self.resize_dim = resize_dim
+    def __init__(self, crop_size=224, sample_video_frames=251,
+                 modalities=("rgb", "flow")):
         self.crop_size = crop_size
         self.sample_video_frames = sample_video_frames
+        self.modalities = modalities
 
     def __call__(self, inputs):
         video_arrays, label = inputs
-        cropped_videos = []
+        cropped_videos = {}
+        expected_inputs = []
+        if "rgb" in self.modalities:
+            expected_inputs.append("rgb")
+        if "flow" in self.modalities:
+            expected_inputs.extend(["flow_x", "flow_y"])
 
-        for video_array in video_arrays:
+        for modality in expected_inputs:
+            video_array = video_arrays[modality]
             # Only look at the first sample_video_frames frames. If not enough,
             # repeat the video.
             indices = list(islice(cycle(range(len(video_array))),
@@ -67,20 +77,59 @@ class I3DTransform(object):
 
             # Rescaling between -1 and 1
             cropped_video = (cropped_video.astype(np.float32) - 128) / 255
-            cropped_videos.append(cropped_video)
+            cropped_videos[modality] = cropped_video
 
-        return tuple(cropped_videos + [label])
+        out_sample = []
+
+        if "rgb" in cropped_videos:
+            out_sample.append(cropped_videos["rgb"])
+        if "flow_x" in cropped_videos:
+            assert "flow_y" in cropped_videos
+            flow = np.concatenate(
+                (cropped_videos["flow_x"], cropped_videos["flow_y"]), axis=0)
+            out_sample.append(flow)
+
+        out_sample.append(label)
+
+        return tuple(out_sample)
+
+
+class I3DEvaluator(chainermn.extensions.GenericMultiNodeEvaluator):
+    def calc_local(self, *args):
+        target = self._targets['main']
+        _ = target(*args)
+        logits = target.y
+        labels = args[-1]
+
+        return logits, labels
+
+    def aggregate(self, results):
+        logits, labels = zip(*results)
+        logits = F.concat(logits, axis=0)
+        labels = F.concat(labels, axis=0)
+
+        target = self._targets['main']
+        acc = target.accfun(logits, labels)
+
+        return acc
 
 
 def main():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument('val_dataset_directory',
                             help="Path to the Kinetics dataset directory.")
-    arg_parser.add_argument('models', choices=sorted(_CHECKPOINTS.keys()), nargs='*',
-                            help="Model(s) to use jointly for prediction. Can be 1 or 2 models "
-                                 "from the available choices. The chosen models should be trained "
-                                 "on the same datasets and have the same number of classes for the "
-                                 "results to be meaningful.")
+    arg_parser.add_argument('--rgb_model_checkpoint', default=None,
+                            help="Checkpoint of the RGB model if any, "
+                                 "At least one of 'rgb_model_checkpoint' "
+                                 "or 'flow_model_checpoint' should be "
+                                 "specified.",
+                            choices=list(_RGB_CHECKPOINTS))
+    arg_parser.add_argument('--flow_model_checkpoint', default=None,
+                            help="Checkpoint of the flow model if any, "
+                                 "At least one of 'rgb_model_checkpoint' "
+                                 "or 'flow_model_checpoint' should be "
+                                 "specified.",
+                            choices=list(_FLOW_CHECKPOINTS))
     arg_parser.add_argument("--batch_size", type=int, default=2)
     arg_parser.add_argument("--num_preprocess_workers", type=int, default=2)
     arg_parser.add_argument("--sample_video_frames", type=int, default=251)
@@ -90,25 +139,26 @@ def main():
     device = comm.intra_rank
     chainer.cuda.get_device_from_id(device).use()
 
-    # Setting up the model
-    if not 1 <= len(args.models) <= 2:
-        raise ValueError("Either 1 or 2 models are required for evaluation!")
-
-    if len(args.models) == 2:
-        n_classes_1 = _CHECKPOINTS[args.models[0]][-1]
-        n_classes_2 = _CHECKPOINTS[args.models[1]][-1]
-        if not n_classes_1 == n_classes_2:
-            raise ValueError("The 2 selected checkpoints have an incompatible number of classes: {}".format(
-                ", ".join(args.models)))
-
     models = []
+    modalities = []
 
-    for checkpoint, modality, num_classes in [_CHECKPOINTS[m] for m in args.models]:
+    if args.rgb_model_checkpoint is not None:
+        checkpoint, num_classes = _RGB_CHECKPOINTS[args.rgb_model_checkpoint]
         model = I3D(num_classes=num_classes, dropout_keep_prob=1.0)
         chainer.serializers.load_npz(checkpoint, model)
         models.append(model)
+        modalities.append("rgb")
+    if args.flow_model_checkpoint is not None:
+        checkpoint, num_classes = _FLOW_CHECKPOINTS[args.flow_model_checkpoint]
+        model = I3D(num_classes=num_classes, dropout_keep_prob=1.0)
+        chainer.serializers.load_npz(checkpoint, model)
+        models.append(model)
+        modalities.append("flow")
 
-    if len(models) == 2:
+    if len(models) == 0:
+        raise ValueError("At least one of 'rgb_model_checkpoint' or "
+                         "'flow_model_checpoint' should be specified.")
+    elif len(models) == 2:
         model = JointI3D(*models)
     else:
         model = models[0]
@@ -116,23 +166,22 @@ def main():
     model.to_gpu(device)
 
     # Setting up the dataset.
-    dataset = KineticsDataset(args.val_dataset_directory,
-                              return_framerate=True)
-    dataset = chainermn.scatter_dataset(dataset, comm, shuffle=True)
+    dataset = ImageSequenceDataset(args.val_dataset_directory)
     dataset = chainer.datasets.TransformDataset(
         dataset=dataset, transform=I3DTransform(
-            sample_video_frames=args.sample_video_frames))
+            sample_video_frames=args.sample_video_frames,
+            modalities=modalities))
+    dataset = chainermn.scatter_dataset(dataset, comm,
+                                        force_equal_length=False)
 
     iterator = chainer.iterators.MultiprocessIterator(
         dataset, batch_size=args.batch_size,
         n_processes=args.num_preprocess_workers, n_prefetch=2,
         repeat=False, shuffle=False)
-    evaluator = chainer.training.extensions.Evaluator(
-        iterator=iterator, target=model, device=device, converter=pad_concat)
-    evaluator = chainermn.create_multi_node_evaluator(
-        actual_evaluator=evaluator, communicator=comm)
-    results = evaluator()
-    print(results)
+    evaluator = I3DEvaluator(
+        iterator=iterator, target=model, device=device, comm=comm)
+    acc = evaluator(None)
+    print("Top-1 accuracy {}".format(acc))
 
 
 if __name__ == '__main__':
