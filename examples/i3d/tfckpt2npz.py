@@ -152,6 +152,11 @@ def tf_checkpoint_to_npz(tensorflow_model_checkpoint, output_npz_checkpoint, num
                          num_classes):
     model = I3D(num_classes=num_classes, dropout_keep_prob=1.0)
     load_tensorflow_checkpoint(model, tensorflow_model_checkpoint)
+
+    # Getting number of input channels and number of classes from the
+    # original checkpoint.
+
+
     # Need to input a dummy batch to force proper initialization of the weights.
     with chainer.using_config('train', False):
         dummy = np.zeros((2, num_channels, 16, 224, 224), dtype=np.float32)
