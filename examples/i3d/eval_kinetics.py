@@ -1,3 +1,15 @@
+import multiprocessing as mp
+
+
+def dummy(*x):
+    return x
+
+
+if __name__ == "__main__":
+    mp.set_start_method('forkserver')
+    p = mp.Process(target=dummy, args=())
+    p.start()
+    p.join()
 import argparse
 import os
 from itertools import islice, cycle
