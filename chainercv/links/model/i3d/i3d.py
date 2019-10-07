@@ -1,6 +1,8 @@
 """
 Implementation of the I3D model, using pre-trained weights from deepmind.
 """
+from functools import partial
+
 import chainer
 import chainer.links as L
 from chainer import functions as F
@@ -8,8 +10,9 @@ from chainer.functions import pad
 from chainer.links import Convolution3D
 from chainer.utils import conv
 import chainermn
-
 import numpy as np
+
+from chainercv.links import PickableSequentialChain
 
 
 def _triplet(x):
@@ -140,6 +143,12 @@ def max_pooling_3d_same(inputs, ksize, strides):
     return F.max_pooling_3d(padded_inputs, ksize=ksize, stride=strides)
 
 
+def i3d_global_average_pooling(inputs):
+    f_height, f_width = inputs.shape[-2:]
+
+    return F.average_pooling_3d(inputs, ksize=(2, f_height, f_width),
+                                stride=(1, 1, 1))
+
 def maybe_add_features(layers, outputs, layer_name, x):
     if layer_name in layers:
         outputs[layer_name] = x
@@ -189,7 +198,7 @@ class I3DInceptionBlock(chainer.Chain):
         return net
 
 
-class I3D(chainer.Chain):
+class I3D(PickableSequentialChain):
     def __init__(self, num_classes, dropout_keep_prob,
                  time_strides=(2, 1, 1, 2, 2,), time_ksizes=(7, 1, 1, 3, 2,),
                  multi_node_bn_comm=None, skip_logits=False):
@@ -211,6 +220,9 @@ class I3D(chainer.Chain):
                                         stride=(time_strides[0], 2, 2),
                                         multi_node_bn_comm=multi_node_bn_comm)
             # Max pooling 1x3x3
+            self.max_pool_3d_2a_3x3 = partial(
+                max_pooling_3d_same, ksize=(self.time_ksizes[1], 3, 3),
+                strides=(self.time_strides[1], 2, 2))
             self.conv3d_2b_1x1 = Unit3D(output_channels=64,
                                         kernel_shape=(1, 1, 1),
                                         multi_node_bn_comm=multi_node_bn_comm)
@@ -218,7 +230,9 @@ class I3D(chainer.Chain):
                                         kernel_shape=(3, 3, 3),
                                         multi_node_bn_comm=multi_node_bn_comm)
             # Max pooling 1x3x3
-
+            self.max_pool_3d_3a_3x3 = partial(
+                max_pooling_3d_same, ksize=(self.time_ksizes[2], 3, 3),
+                strides=(self.time_strides[2], 2, 2))
             # Mixed 3b
             self.mixed_3b = I3DInceptionBlock(branch_0_channels=64,
                                               branch_1_channels=(96, 128),
@@ -234,7 +248,9 @@ class I3D(chainer.Chain):
                                               multi_node_bn_comm=multi_node_bn_comm)
 
             # Max pooling 3x3x3 stride 2x2x2
-
+            self.max_pool_3d_4a_3x3 = partial(
+                max_pooling_3d_same, ksize=(self.time_ksizes[3], 3, 3),
+                strides=(self.time_strides[3], 2, 2))
             # Mixed 4b
             self.mixed_4b = I3DInceptionBlock(branch_0_channels=192,
                                               branch_1_channels=(96, 208),
@@ -271,7 +287,9 @@ class I3D(chainer.Chain):
                                               multi_node_bn_comm=multi_node_bn_comm)
 
             # Max pooling 2x2x2 stride 2x2x2
-
+            self.max_pool_3d_5a_2x2 = partial(
+                max_pooling_3d_same, ksize=(self.time_ksizes[4], 2, 2),
+                strides=(self.time_strides[4], 2, 2))
             # Mixed 5b
             self.mixed_5b = I3DInceptionBlock(branch_0_channels=256,
                                               branch_1_channels=(160, 320),
@@ -289,81 +307,15 @@ class I3D(chainer.Chain):
             # Logits
             # Average pooling 2x7x7 stride 1x1x1 padding valid
             # (i.e. H and W should become 1)
-            # Dropout
+            self.avg_pool = i3d_global_average_pooling
+
             if not self.skip_logits:
+                # Dropout
+                self.dropout = partial(
+                    F.dropout, ratio=1 - self.dropout_keep_prob)
                 self.logits_conv3d_0c_1x1 = Unit3D(
                     output_channels=self.num_classes, kernel_shape=(1, 1, 1),
                     activation_fn=None, use_batch_norm=False, use_bias=True)
-
-    def __call__(self, inputs, layers=None):
-        if layers is None:
-            layers = ["averaged_logits"]
-        outputs = {}
-
-        net = self.conv3d_1a_7x7(inputs)
-        maybe_add_features(layers, outputs, "conv3d_1a_7x7", net)
-        net = max_pooling_3d_same(net, ksize=(self.time_ksizes[1], 3, 3),
-                                  strides=(self.time_strides[1], 2, 2))
-        maybe_add_features(layers, outputs, "max_pool_3d_2a_3x3", net)
-
-        net = self.conv3d_2b_1x1(net)
-        maybe_add_features(layers, outputs, "conv3d_2b_1x1", net)
-        net = self.conv3d_2c_3x3(net)
-        maybe_add_features(layers, outputs, "conv3d_2c_3x3", net)
-        net = max_pooling_3d_same(net, ksize=(self.time_ksizes[2], 3, 3),
-                                  strides=(self.time_strides[2], 2, 2))
-        maybe_add_features(layers, outputs, "max_pool_3d_3a_3x3", net)
-
-        # Mixed 3b
-        net = self.mixed_3b(net)
-        maybe_add_features(layers, outputs, "mixed_3b", net)
-        # Mixed 3c
-        net = self.mixed_3c(net)
-        maybe_add_features(layers, outputs, "mixed_3c", net)
-        net = max_pooling_3d_same(net, ksize=(self.time_ksizes[3], 3, 3),
-                                  strides=(self.time_strides[3], 2, 2))
-        maybe_add_features(layers, outputs, "max_pool_3d_4a_3x3", net)
-
-        # Mixed 4b
-        net = self.mixed_4b(net)
-        maybe_add_features(layers, outputs, "mixed_4b", net)
-        # Mixed 4c
-        net = self.mixed_4c(net)
-        maybe_add_features(layers, outputs, "mixed_4c", net)
-        # Mixed 4d
-        net = self.mixed_4d(net)
-        maybe_add_features(layers, outputs, "mixed_4d", net)
-        # Mixed 4e
-        net = self.mixed_4e(net)
-        maybe_add_features(layers, outputs, "mixed_4e", net)
-        # Mixed 4f
-        net = self.mixed_4f(net)
-        maybe_add_features(layers, outputs, "mixed_4f", net)
-        net = max_pooling_3d_same(net, ksize=(self.time_ksizes[4], 2, 2),
-                                  strides=(self.time_strides[4], 2, 2))
-        maybe_add_features(layers, outputs, "max_pool_3d_5a_2x2", net)
-
-        # Mixed 5b
-        net = self.mixed_5b(net)
-        maybe_add_features(layers, outputs, "mixed_5b", net)
-        # Mixed 5c
-        net = self.mixed_5c(net)
-        maybe_add_features(layers, outputs, "mixed_5c", net)
-        # Logits
-        f_height, f_width = net.shape[-2:]
-        net = F.average_pooling_3d(net, ksize=(2, f_height, f_width),
-                                   stride=(1, 1, 1))
-        maybe_add_features(layers, outputs, "avg_pool", net)
-
-        if not self.skip_logits:
-            net = F.dropout(net, 1. - self.dropout_keep_prob)
-            net = self.logits_conv3d_0c_1x1(net)
-            maybe_add_features(layers, outputs, "logits", net)
-            net = F.squeeze(F.mean(net, axis=2), axis=(2, 3))
-            maybe_add_features(layers, outputs, "averaged_logits", net)
-
-        if len(outputs) == 1:
-            return list(outputs.values())[0]
-        else:
-            return outputs
-
+                # Average pooling, removing unnecessary spatial dimensions.
+                self.time_mean_pool = partial(F.mean, axis=2)
+                self.averaged_logits = partial(F.squeeze, axis=(2, 3))
