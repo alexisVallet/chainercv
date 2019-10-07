@@ -1,19 +1,25 @@
 import argparse
 import os
 from itertools import islice, cycle
+import glob
 
 import numpy as np
 import chainer
 import chainer.functions as F
 import chainer.links as L
 import chainermn
+try:
+    import chainerio
+    _chainerio_is_available = True
+except ImportError:
+    _chainerio_is_available = False
+
 
 from chainercv.links.model.i3d.i3d import I3D
 from chainercv.transforms.image.center_crop import center_crop
 from examples.i3d.image_sequence_dataset import ImageSequenceDataset
 
 _FLOW_CHECKPOINTS = {
-
     "flow_imagenet_kinetics400": (os.path.join('models', 'flow_imagenet_kinetics400.npz'), 400),
     "flow_scratch_kinetics400": (os.path.join('models', 'flow_scratch_kinetics400.npz'), 400)
 }
@@ -133,6 +139,7 @@ def main():
     arg_parser.add_argument("--batch_size", type=int, default=2)
     arg_parser.add_argument("--num_preprocess_workers", type=int, default=2)
     arg_parser.add_argument("--sample_video_frames", type=int, default=251)
+    arg_parser.add_argument("--use_chainerio", action='store_true')
     args = arg_parser.parse_args()
 
     comm = chainermn.create_communicator()
@@ -166,13 +173,27 @@ def main():
     model.to_gpu(device)
 
     # Setting up the dataset.
-    dataset = ImageSequenceDataset(args.val_dataset_directory)
+    if not _chainerio_is_available:
+        shard_filenames = list(glob.glob(os.path.join(
+            args.val_dataset_directory, "*.zip")))
+    else:
+        shard_filenames = [
+            os.path.join(args.val_dataset_directory, p) for p in
+            chainerio.list(args.val_dataset_directory)
+            if p.endswith('.zip')]
+    if len(shard_filenames) == 0:
+        raise IOError("Could not find any .zip shard files in {}!".format(
+            args.val_dataset_directory))
+    # Split the shards across workers for more efficient I/O, avoiding
+    # redundancies.
+    shard_filenames = chainermn.scatter_dataset(
+        shard_filenames, comm, force_equal_length=False)
+    dataset = ImageSequenceDataset(shard_filenames,
+                                   use_chainerio=args.use_chainerio)
     dataset = chainer.datasets.TransformDataset(
         dataset=dataset, transform=I3DTransform(
             sample_video_frames=args.sample_video_frames,
             modalities=modalities))
-    dataset = chainermn.scatter_dataset(dataset, comm,
-                                        force_equal_length=False)
 
     iterator = chainer.iterators.MultiprocessIterator(
         dataset, batch_size=args.batch_size,

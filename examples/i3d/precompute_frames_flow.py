@@ -7,7 +7,6 @@ import argparse
 import os
 import zipfile
 from itertools import count
-import tempfile
 
 import cv2
 import numpy as np
@@ -18,6 +17,7 @@ import chainermn
 from chainercv.transforms.image.resize import resize
 from chainercv.datasets.kinetics.kinetics_dataset import KineticsDataset
 from examples.i3d.image_sequence_dataset import ImageSequenceShardDataset
+
 
 def resize_video(processed_video, resize_dim):
     # Resize so the smallest dimension is fixed.
@@ -158,8 +158,7 @@ def main():
     for i in count():
         start_shard = i
         shard_filename = os.path.join(
-            args.output_directory, "shard_{}_{}.zip".format(comm.rank,
-                                                            i))
+            args.output_directory, "shard_{}_{}.zip".format(comm.rank, i))
         try:
             shard_dataset = ImageSequenceShardDataset(shard_filename)
         except IOError:
