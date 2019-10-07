@@ -536,8 +536,12 @@ def check_chainer_activations_against_tf(model_chainer, input_channels, num_clas
             print(chainer.config.dtype)
             input_chainer = cp.array(np.moveaxis(input_tf, 4, 1).astype(
                 input_dtype))
-            end_points_chainer = model_chainer(
-                input_chainer, layers=list(tf_end_point_to_chainer.values()))
+            model_chainer.pick = list(tf_end_point_to_chainer.values())
+            end_points_chainer = model_chainer(input_chainer)
+            end_points_chainer = {
+                key: val for key, val in
+                zip(model_chainer.pick, end_points_chainer)
+            }
     print("Comparing results...")
     if chainer_dtype == np.float32:
         rtol = 1E-4
@@ -562,7 +566,8 @@ def check_chainer_activations_against_tf(model_chainer, input_channels, num_clas
 def test_tf_vs_chainer_i3d():
     for chainer_dtype, input_dtype in ((np.float32, np.float32),):
         for checkpoint, num_classes, input_channels, scope_prefix in _get_checkpoints():
-            model_chainer = i3d.I3D(num_classes=num_classes, dropout_keep_prob=1.0)
+            model_chainer = i3d.I3D(num_classes=num_classes,
+                                    dropout_keep_prob=1.0)
             load_tensorflow_checkpoint(model_chainer, checkpoint)
             model_chainer.to_gpu(0)
             check_chainer_activations_against_tf(model_chainer, input_channels, num_classes, checkpoint,
