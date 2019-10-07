@@ -200,8 +200,12 @@ def main():
     # redundancies.
     shard_filenames = chainermn.scatter_dataset(
         shard_filenames, comm, force_equal_length=False)
+    print("Worker {}: processing {} shards.".format(
+        comm.rank, len(shard_filenames)))
     dataset = ImageSequenceDataset(shard_filenames,
                                    use_chainerio=args.use_chainerio)
+    print("Worker {}: processing {} samples".format(
+        comm.rank, len(dataset)))
     dataset = chainer.datasets.TransformDataset(
         dataset=dataset, transform=I3DTransform(
             sample_video_frames=args.sample_video_frames,
