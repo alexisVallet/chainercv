@@ -156,10 +156,10 @@ def tf_checkpoint_to_npz(tensorflow_model_checkpoint, output_npz_checkpoint):
     num_channels = None
     num_classes = None
     for key, shape in var_map.items():
-        if key.endswith("Conv3d_1a_7x7"):
-            num_channels = shape[2]
-        if key.endswith("Logits/Conv3d_0c_1x1"):
-            num_classes = shape[3]
+        if key.endswith("Conv3d_1a_7x7/conv_3d/w"):
+            num_channels = shape[3]
+        if key.endswith("Logits/Conv3d_0c_1x1/conv_3d/w"):
+            num_classes = shape[4]
 
     model = I3D(num_classes=num_classes, dropout_keep_prob=1.0)
     load_tensorflow_checkpoint(model, tensorflow_model_checkpoint)

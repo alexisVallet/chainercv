@@ -577,7 +577,7 @@ def test_tf_vs_chainer_i3d():
 def test_tf_vs_npz_i3d():
     for checkpoint, num_classes, input_channels, scope_prefix in _get_checkpoints():
         with tempfile.NamedTemporaryFile() as tmp_npz_checkpoint_file:
-            tf_checkpoint_to_npz(checkpoint, tmp_npz_checkpoint_file.name, input_channels, num_classes)
+            tf_checkpoint_to_npz(checkpoint, tmp_npz_checkpoint_file.name)
             tf.reset_default_graph()
             for chainer_dtype, input_dtype in ((np.float32, np.float32),):
                 model = i3d.I3D(num_classes, 1.0)
