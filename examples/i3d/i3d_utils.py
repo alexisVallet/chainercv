@@ -206,7 +206,7 @@ class VideoTransform(object):
 
         if self.compute_flow:
             # Computing TVL1 optical flow
-            optical_flow = cv2.DualTVL1OpticalFlow_create()
+            optical_flow = cv2.optflow.DualTVL1OpticalFlow_create()
             flow_array = []
 
             num_frames = video_array.shape[0]
@@ -234,5 +234,3 @@ class VideoTransform(object):
             out_dict["flow_y"] = chw_flow_video[:, 1]
 
         return out_dict, label
-
-

@@ -28,9 +28,8 @@ except ImportError:
 
 
 from chainercv.links.model.i3d.i3d import I3D
-from chainercv.datasets.kinetics.kinetics_dataset import KineticsDataset
 from chainercv.transforms.image.center_crop import center_crop
-from examples.i3d.i3d_utils import ImageSequenceDataset, VideoTransform
+from examples.i3d.i3d_utils import ImageSequenceDataset
 
 _FLOW_CHECKPOINTS = {
     "flow_imagenet_kinetics400": (os.path.join('models', 'flow_imagenet_kinetics400.npz'), 400),
@@ -186,36 +185,24 @@ def main():
     model = L.Classifier(predictor=model)
     model.to_gpu(device)
 
-    # Try to open the input dataset in order as either KineticsDataset
-    # or ImageSequenceDataset.
-    dataset = KineticsDataset(
-        data_dir=args.val_dataset_directory, return_framerate=True,
-        num_video_check_workers=args.num_preprocess_workers)
-    if len(dataset) > 0:
-        dataset = chainer.datasets.TransformDataset(
-            dataset, VideoTransform(
-                compute_flow=args.flow_model_checkpoint is not None))
-        dataset = chainermn.scatter_dataset(
-            dataset, comm, force_equal_length=False)
-    elif len(dataset) == 0:
-        # Setting up the dataset.
-        if not _chainerio_is_available:
-            shard_filenames = list(glob.glob(os.path.join(
-                args.val_dataset_directory, "*.zip")))
-        else:
-            shard_filenames = [
-                os.path.join(args.val_dataset_directory, p) for p in
-                chainerio.list(args.val_dataset_directory)
-                if p.endswith('.zip')]
-        if len(shard_filenames) == 0:
-            raise IOError("Could not find any .zip shard files in {}!".format(
-                args.val_dataset_directory))
-        # Split the shards across workers for more efficient I/O, avoiding
-        # redundancies.
-        shard_filenames = chainermn.scatter_dataset(
-            shard_filenames, comm, force_equal_length=False)
-        dataset = ImageSequenceDataset(shard_filenames,
-                                       use_chainerio=args.use_chainerio)
+    # Setting up the dataset.
+    if not _chainerio_is_available:
+        shard_filenames = list(glob.glob(os.path.join(
+            args.val_dataset_directory, "*.zip")))
+    else:
+        shard_filenames = [
+            os.path.join(args.val_dataset_directory, p) for p in
+            chainerio.list(args.val_dataset_directory)
+            if p.endswith('.zip')]
+    if len(shard_filenames) == 0:
+        raise IOError("Could not find any .zip shard files in {}!".format(
+            args.val_dataset_directory))
+    # Split the shards across workers for more efficient I/O, avoiding
+    # redundancies.
+    shard_filenames = chainermn.scatter_dataset(
+        shard_filenames, comm, force_equal_length=False)
+    dataset = ImageSequenceDataset(shard_filenames,
+                                   use_chainerio=args.use_chainerio)
     dataset = chainer.datasets.TransformDataset(
         dataset=dataset, transform=I3DTransform(
             sample_video_frames=args.sample_video_frames,
